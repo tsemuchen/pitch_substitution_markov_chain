@@ -218,8 +218,9 @@ $$
 \begin{aligned}
 \textbf{EWRA}_0 &= 0, \\
 \textbf{EWRA}_i &= \boldsymbol{\lambda} \cdot \textbf{EWRA}_{i-1} + \textbf{SARA}_{i}, \\
-\textbf{SARA} &= \min(\text{runs}, \mathbf{c}) + \boldsymbol{\alpha} \cdot \mathbf{1}\{\text{pitches} \ge 20\}, \\
+\textbf{SARA}_i &= \min(\text{runs}_i, \mathbf{c}) + \boldsymbol{\alpha} \cdot \mathbf{1} \{\text{pitches} \ge 20 \}, \\
 \boldsymbol{\lambda} &= 0.5^{\tfrac{1}{\mathbf{h}}}, \\
+\mathbf{i} &= \text{i-th inning}, \\
 \mathbf{h} &= \text{half-life}, \\
 \mathbf{c} &= \text{cap runs}, \\
 \boldsymbol{\alpha} &= \text{stress bump}.
