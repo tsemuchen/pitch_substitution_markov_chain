@@ -221,7 +221,8 @@ $$
 \textbf{SARA} &= \min(\text{runs}, \mathbf{c}) + \boldsymbol{\alpha} \cdot \mathbf{1}\{\text{pitches} \ge 20\}, \\
 \boldsymbol{\lambda} &= 0.5^{\tfrac{1}{\mathbf{h}}}, \\
 \mathbf{h} &= \text{half-life}, \\
-\mathbf{c} &= \text{cap runs.}
+\mathbf{c} &= \text{cap runs}, \\
+\boldsymbol{\alpha} &= \text{stress bump}.
 \end{aligned}
 $$
 
