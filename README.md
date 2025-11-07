@@ -213,13 +213,14 @@ Using our constructed dataset, we define conditioning variables: pitcher fatigue
 To summarize a pitcher’s performance entering a new inning, we develop the Exponential Weighted Runs Allowed (EWRA) metric, a recency-aware score that emphasizes recent performance while gradually fading the influence of earlier innings. For each inning, we define Stress-Adjust Run Allowed (SARA) that includes both actual runs and a stress bump to account for demanding innings: innings in which a pitcher throws 20 or more pitches are treated as contributing an additional 0.5 effective runs, reflecting the well-established impact of stressful innings on subsequent performance. EWRA is then computed recursively using an exponential decay factor governed by a half-life parameter, ensuring that recent innings carry more weight while older, potentially anomalous events diminish smoothly. This produces a single, interpretable measure of a pitcher’s short-term form and stability entering the upcoming inning.
 
 $$
+\large
 \begin{aligned}
-\text{EWRA}_0 &= 0, \\
-\text{EWRA}_i &= \lambda \cdot \text{EWRA}_{i-1} + \text{SARA}_{i}, \\
-\text{SARA} &= \min(\text{runs}, c) + \alpha \cdot \mathbf{1}\{\text{pitches} \ge 20\}, \\
-\lambda &= 0.5^{\tfrac{1}{h}}, \\
-h &= \text{half-life}, \\
-c &= \text{cap runs.}
+\mathbf{EWRA}_0 &= 0, \\
+\mathbf{EWRA}_i &= \boldsymbol{\lambda} \cdot \mathbf{EWRA}_{i-1} + \mathbf{SARA}_{i}, \\
+\mathbf{SARA} &= \min(\text{runs}, \mathbf{c}) + \boldsymbol{\alpha} \cdot \mathbf{1}\{\text{pitches} \ge 20\}, \\
+\boldsymbol{\lambda} &= 0.5^{\tfrac{1}{\mathbf{h}}}, \\
+\mathbf{h} &= \text{half-life}, \\
+\mathbf{c} &= \text{cap runs.}
 \end{aligned}
 $$
 
