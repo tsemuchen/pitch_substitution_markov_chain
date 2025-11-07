@@ -574,7 +574,7 @@ In the 2019 case, we simulated a comparable situation: holding a small lead, a m
   <em>Figure 1. Estimated Substitution Advantage (keep_run_est - sub_run_est)</em>
 </p>
 
-Code for visiualizatoin
+Code for visiualization
 ```
 # Turn vector into a tibble
 df <- enframe(decision_map, name = "state", value = "value")
