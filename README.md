@@ -5,7 +5,7 @@ James Chen & Charlie Ko, 11/6/2025
 ---
 
 ## 1. Problem Statement
-During a close game in baseball, any tiny decision such as a substitute in  a pinch hitter or a reliever could dramatically change the outcome of the come. This study aims to provide a Markov chain analysis to assist coaching staff to evaluate the optimal timing to pull the starter in the inning to reduce points lost. To demonstrate the practical relevance of our model, we decide to apply it to a highly controversial real-world scenario: Houston manager A.J. Hinch’s decision to remove Zack Greinke in the 7th inning of World Series Game 7, which was widely regarded as one of the most controversial pitching substitutions in recent Major League Baseball (MLB) history. Beyond the famous 2019 case, we hope to develop a framework with the adapability to explore substitution strategies across a wide spectrum of game conditions.
+During a close game in baseball, any tiny decision such as a substitute in  a pinch hitter or a reliever could dramatically change the outcome of the game. This study aims to provide a Markov chain analysis to assist coaching staff to evaluate the optimal timing to pull the starter in the inning to reduce points lost. To demonstrate the practical relevance of our model, we decide to apply it to a highly controversial real-world scenario: Houston manager A.J. Hinch’s decision to remove Zack Greinke in the 7th inning of World Series Game 7, which was widely regarded as one of the most controversial pitching substitutions in recent Major League Baseball (MLB) history. Beyond the famous 2019 case, we hope to develop a framework with the adapability to explore substitution strategies across a wide spectrum of game conditions.
 
 ---
 
