@@ -1,0 +1,665 @@
+---
+title: "Stat 479 Project 2"
+author: "James Chen"
+date: "2025-10-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# install.packages("devtools")
+# devtools::install_github("BillPetti/baseballr")
+```
+
+
+# library
+```{r}
+library(baseballr)
+library(dplyr)
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(colorBlindness)
+```
+
+
+# Scraper
+```{r}
+## Code modified from Bill Petti's original annual Statcast scraper:
+## Main change is in the column names of the fielders
+
+annual_statcast_query <- function(season) {
+  
+  data_base_column_types <- 
+    readr::read_csv("https://app.box.com/shared/static/q326nuker938n2nduy81au67s2pf9a3j.csv")
+  
+  dates <- 
+    seq.Date(as.Date(paste0(season, '-03-01')),
+             as.Date(paste0(season, '-12-01')), 
+             by = '4 days')
+  
+  date_grid <- 
+    tibble::tibble(start_date = dates, 
+                   end_date = dates + 3)
+  
+  safe_savant <- 
+    purrr::safely(baseballr::scrape_statcast_savant)
+  
+  payload <- 
+    purrr::map(.x = seq_along(date_grid$start_date),
+               ~{message(paste0('\nScraping week of ', date_grid$start_date[.x], '...\n'))
+                 payload <- 
+                   safe_savant(start_date = date_grid$start_date[.x], 
+                               end_date = date_grid$end_date[.x], 
+                               type = 'pitcher')
+                 return(payload)
+               })
+  
+  payload_df <- purrr::map(payload, 'result')
+  
+  number_rows <- 
+    purrr::map_df(.x = seq_along(payload_df),
+                  ~{number_rows <- 
+                    tibble::tibble(week = .x, 
+                                   number_rows = length(payload_df[[.x]]$game_date))
+                  }) %>%
+    dplyr::filter(number_rows > 0) %>%
+    dplyr::pull(week)
+  
+  payload_df_reduced <- payload_df[number_rows]
+  
+  payload_df_reduced_formatted <- 
+    purrr::map(.x = seq_along(payload_df_reduced), 
+               ~{cols_to_transform <- 
+                 c("pitcher", "fielder_2", "fielder_3",
+                   "fielder_4", "fielder_5", "fielder_6", "fielder_7",
+                   "fielder_8", "fielder_9")
+               df <- 
+                 purrr::pluck(payload_df_reduced, .x) %>%
+                 dplyr::mutate_at(.vars = cols_to_transform, as.numeric) %>%
+                 dplyr::mutate_at(.vars = cols_to_transform, function(x) {ifelse(is.na(x), 999999999, x)})
+               character_columns <- 
+                 data_base_column_types %>%
+                 dplyr::filter(class == "character") %>%
+                 dplyr::pull(variable)
+               numeric_columns <- 
+                 data_base_column_types %>%
+                 dplyr::filter(class == "numeric") %>%
+                 dplyr::pull(variable)
+               integer_columns <- 
+                 data_base_column_types %>%
+                 dplyr::filter(class == "integer") %>%
+                 dplyr::pull(variable)
+               df <- 
+                 df %>%
+                 dplyr::mutate_if(names(df) %in% character_columns, as.character) %>%
+                 dplyr::mutate_if(names(df) %in% numeric_columns, as.numeric) %>%
+                 dplyr::mutate_if(names(df) %in% integer_columns, as.integer)
+               return(df)
+               })
+  
+  combined <- payload_df_reduced_formatted %>%
+    dplyr::bind_rows()
+  
+  return(combined)
+}
+```
+
+
+
+# Load data
+```{r}
+# raw_statcast2024 <- annual_statcast_query(2024)
+# save(raw_statcast2024, file = "raw_statcast2024.RData")
+
+# Load from saved file
+load("raw_statcast2024.RData")
+
+# Load the Chadwick player register
+# chadwick_players <- baseballr::chadwick_player_lu()
+# save(chadwick_players, file = "chadwick_players.RData")
+load("chadwick_players.RData")
+```
+
+
+# Clean
+```{r}
+# filter potential useful columns
+useful_columns <- c("game_date", "player_name", "player", "batter",  "pitcher",
+                   "events", "description", "game_type", "stand", "p_throws", "home_team", 
+                   "away_team", "balls", "strikes", "game_year", "on_3b", "on_2b", 
+                   "on_1b", "outs_when_up", "inning", "inning_topbot", "game_pk", 
+                   "at_bat_number", "pitch_number", "pitch_name", "bat_score", 
+                   "fld_score", "post_bat_score", "post_fld_score", "delta_run_exp",
+                   "age_pit", "n_thruorder_pitcher", "bat_score_diff")
+
+# Clean data and create BaseRunner column
+# Keep only regular season & 1-8 innings
+game_seq <- raw_statcast2024 %>% 
+  dplyr::select(any_of(useful_columns)) %>%
+  filter(game_type == "R", inning < 9) %>% 
+  arrange(game_date, desc(game_pk), factor(inning_topbot, levels = c("Top", "Bot")),
+    inning, at_bat_number, pitch_number) %>% 
+  rename(pitcher_id = pitcher) %>% 
+  dplyr::mutate(
+    BaseRunner = 
+      paste0(1*(!is.na(on_1b)),1*(!is.na(on_2b)),1*(!is.na(on_3b))))
+```
+
+
+# Picher-level data construction
+```{r}
+# Prepare a pitcher look up
+pitcher_lookup <- chadwick_players %>%
+  filter(!is.na(key_mlbam)) %>%
+  transmute(mlbam_id = key_mlbam,
+            pitcher_name = paste(name_first, name_last)) %>% 
+  rename(pitcher_id = mlbam_id)
+
+pitcher_info <- game_seq %>%
+  group_by(game_pk, pitcher_id) %>%
+  summarise(n_pitch = n(), .groups = "drop") %>%   # count pitches per game per pitcher
+  group_by(pitcher_id) %>%
+  summarise(pitch_avg = mean(n_pitch),
+            pitch_med = median(n_pitch),
+            max_pitch = max(n_pitch),
+            n_game = n(),
+            .groups = "drop") %>%  # average across all games
+  mutate(role = case_when(
+    max_pitch >= 80 ~ "starter",
+    max_pitch >= 50 ~ "long_reliever",
+    TRUE           ~ "reliever"
+  ))
+
+
+pitch_mix <- game_seq %>%
+  filter(!is.na(pitch_name)) %>%
+  group_by(pitcher_id, pitch_name) %>%
+  summarise(n_pitch = n(), .groups = "drop_last") %>%
+  mutate(total_pitch = sum(n_pitch)) %>%
+  ungroup() %>%
+  mutate(perc = 100 * n_pitch / total_pitch) %>%
+  group_by(pitcher_id) %>%
+  # only keep pitch types that are at least 5% of total usage, and 30 pitches thrown
+  filter(perc >= 5, n_pitch > 30) %>%
+  mutate(repertoire = n_distinct(pitch_name)) %>%          # count of qualifying pitches
+  slice_max(n_pitch, n = 2, with_ties = FALSE) %>%
+  arrange(pitcher_id, desc(perc)) %>%
+  summarise(
+    top1_pitch = first(pitch_name),
+    top1_perc  = first(perc),
+    top2_pitch = nth(pitch_name, 2),
+    top2_perc  = nth(perc, 2),
+    repertoire = first(repertoire), 
+    .groups = "drop"
+  )
+
+# combine pitcher information and pitch mix
+pitcher_profile <- pitcher_lookup %>% 
+  right_join(pitcher_info) %>% 
+  left_join(pitch_mix)
+```
+
+
+# Half_inning_scores
+```{r}
+game_seq <- game_seq %>%
+  arrange(game_pk, inning, inning_topbot, at_bat_number, pitch_number)
+
+half_inning_scores <- game_seq %>%
+  group_by(game_pk, inning, inning_topbot) %>%
+  summarise(
+    # Batting team’s score at the very end of the half-inning
+    half_inning_end_bat_score = max(post_bat_score, na.rm = TRUE), 
+    .groups = "drop"
+  )
+```
+
+
+# Adding conditional variables
+```{r}
+
+# Add pitching_team and establish strict ordering, pitch order
+game_seq <- game_seq %>%
+  mutate(
+    pitching_team = if_else(inning_topbot == "Top", home_team, away_team),
+    half = factor(inning_topbot, levels = c("Top", "Bot"))
+  ) %>%
+  arrange(game_pk, pitching_team, inning, half, at_bat_number, pitch_number) %>%
+  group_by(game_pk, pitching_team) %>%
+  mutate(row_in_group = row_number()) %>%
+  
+  # First appearance row for each pitcher within game_pk × pitching_team
+  group_by(game_pk, pitching_team, pitcher_id) %>%
+  mutate(first_row_for_pitcher = min(row_in_group)) %>%
+  ungroup() %>%
+  group_by(game_pk, pitching_team) %>%
+  mutate(pitcher_order = dense_rank(first_row_for_pitcher)) %>%
+  ungroup()
+
+# Pitch count
+game_seq <- game_seq %>%
+  # Make sure pitches are in true game order
+  mutate(half = factor(half, levels = c("Top", "Bot"))) %>% 
+  arrange(game_pk, pitcher_id, inning, half, at_bat_number, pitch_number) %>%
+  group_by(game_pk, pitcher_id) %>%
+  mutate(pitch_count = row_number()) %>%
+  ungroup()
+
+level_names <- c("Fresh", "Settled-In", "Working Load", "Fatigued", "Redline")
+
+# Fatigue level
+role_cuts <- tribble(
+  ~role,           ~c1, ~c2, ~c3, ~c4, ~c5,  # c5 is the "above" bucket
+  "starter",        30,   60,   85,  100, Inf,
+  "long_reliever",  20,   40,   55,   70, Inf,
+  "reliever",       15,   25,   35,   45, Inf
+)
+
+game_seq <- game_seq %>%
+  # Bring in the thresholds per pitcher
+  left_join(
+    pitcher_profile %>%
+      select(pitcher_id, role),
+    by = "pitcher_id"
+  ) %>%
+  left_join(role_cuts, by = "role") %>%
+  # Assign a fatigue label for each pitch (based on cumulative pitch_count)
+  mutate(fatigue_level = case_when(
+    pitch_count <= c1  ~ "Fresh",
+    pitch_count <= c2  ~ "Settled-In",
+    pitch_count <= c3  ~ "Working Load",
+    pitch_count <= c4  ~ "Fatigued",
+    pitch_count <= c5  ~ "Redline"
+  ),
+    # Ordered factor
+    fatigue_level = factor(fatigue_level, levels = level_names, ordered = TRUE),
+    # Numeric code 1–5
+    fatigue_level_num = as.integer(fatigue_level)
+  ) %>%
+  select(-c1, -c2, -c3, -c4, -c5)
+
+# Flip the sign of bat_score_diff for pitch_score_diff
+game_seq <-game_seq %>%  mutate(pitch_score_diff= bat_score_diff*-1)
+```
+
+
+# Get expected run 
+```{r}
+ab <- game_seq %>%
+  group_by(game_pk, inning, at_bat_number, inning_topbot) %>%
+  summarise(
+    game_date          = first(game_date),
+    batter             = first(batter),
+    player_name        = first(player_name),
+    start_outs         = first(outs_when_up),
+    start_baserunners  = first(BaseRunner),
+    start_bat_score    = first(bat_score),
+    end_post_bat_score = last(post_bat_score),
+
+    # Pitcher info + fatigue over the AB
+    pitcher_id         = first(pitcher_id),
+    pitcher_order      = first(pitcher_order),
+    fatigue_min        = suppressWarnings(min(fatigue_level_num, na.rm = TRUE)),
+    fatigue_max        = suppressWarnings(max(fatigue_level_num, na.rm = TRUE)),
+    n_pitch_ab         = n(),
+    
+    n_thruorder_pitcher = first(n_thruorder_pitcher),
+    bat_score_diff       = first(bat_score_diff),
+    pitch_score_diff     = first(pitch_score_diff),
+    .groups = "drop"
+  ) %>%
+  # Re-group by half-inning so lead() looks within the half-inning
+  group_by(game_pk, inning, inning_topbot) %>%
+  arrange(at_bat_number, .by_group = TRUE) %>%
+  mutate(
+    # Next AB's start state
+    next_outs        = lead(start_outs),
+    next_baserunners = lead(start_baserunners),
+
+    # If next is missing (last ab in half-inning) or resets to 0.000 (new half-inning),
+    # Force absorbing 3.000 for this ab's end state
+    end_outs = ifelse(is.na(next_outs) | (next_outs == 0 & next_baserunners == "000"), 3L, next_outs),
+    end_baserunners = ifelse(is.na(next_baserunners) | (next_outs == 0 & next_baserunners == "000"), "000", next_baserunners),
+
+    GameState     = sprintf("%d.%s", start_outs, start_baserunners),
+    end_GameState = sprintf("%d.%s", end_outs,   end_baserunners)
+  ) %>%
+  ungroup()
+
+# Run scored against
+ab <- ab %>%
+  left_join(half_inning_scores, by = c("game_pk", "inning", "inning_topbot")) %>%
+  mutate(
+    runs_scored_in_ab      = end_post_bat_score - start_bat_score,
+    future_runs_from_start = half_inning_end_bat_score - start_bat_score
+  )
+
+# Expected runs calculation
+expected_runs <- ab %>%
+  group_by(start_outs, start_baserunners) %>%
+  summarise(
+    expected_runs = mean(future_runs_from_start, na.rm = TRUE),
+    n = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  rename(
+    outs = start_outs,
+    baserunners = start_baserunners
+  )
+```
+
+
+
+# Expected run formating
+```{r}
+state_levels <- c("000","001","010","011","100","101","110","111")
+
+expected_runs_wide <- expected_runs %>%
+  mutate(
+    outs = paste0("Outs: ", outs),
+    baserunners = factor(baserunners, levels = state_levels)
+  ) %>%
+  select(BaseRunner = baserunners, outs, expected_runs) %>%
+  pivot_wider(names_from = outs, values_from = expected_runs) %>%
+  arrange(BaseRunner) %>%
+  mutate(across(starts_with("Outs:"), ~round(.x, 3)))
+```
+
+
+EWRA Formulas
+
+EWRA_0 = 0
+EWRA_j = lambda * EWRA_{j-1} + SARA; lambda = 0.5^(1/h), h = half life
+SARA = min(runs, c) + alpha * 1{pitches >= 20}; c = cap runs
+
+
+# Exponential Weighted Run Allowed (EWRA)
+```{r}
+half_life_inn <- 1.5       # h
+cap_runs      <- 3         # c
+stress_bump   <- 0.5       # alpha
+
+decay <- 0.5^(1/half_life_inn)  # lambda
+
+# Per-inning runs allowed + simple stress flag for each pitcher-game
+runs_by_inning <- ab %>%
+  group_by(game_pk, pitcher_id, inning, inning_topbot) %>%
+  summarise(
+    runs_allowed = sum(pmax(runs_scored_in_ab, 0), na.rm = TRUE),
+    n_pitch_ip    = sum(n_pitch_ab),
+    .groups = "drop_last"
+  ) %>%
+  arrange(game_pk, pitcher_id, inning) %>%
+  mutate(
+    runs_capped = pmin(runs_allowed, cap_runs),
+    stress_flag = as.integer(n_pitch_ip >= 20),
+    sara    = runs_capped + stress_bump * stress_flag # Stress-Adjusted Run Allowed (SARA)
+  )
+
+# 2) EWRA calculation
+ewra_enter <- runs_by_inning %>%
+  group_by(game_pk, pitcher_id) %>%
+  arrange(inning, .by_group = TRUE) %>%
+  mutate(
+    # accumulate over SARA to get EWRA at the END of each inning
+    EWRA_end = accumulate(sara, ~ .x * decay + .y, .init = 0) %>% tail(-1),
+    # entering the current inning = end of previous inning
+    EWRA_enter = dplyr::lag(EWRA_end, default = 0)
+  ) %>%
+  ungroup() %>%
+  select(game_pk, pitcher_id, inning, EWRA_enter)
+
+# join with ab
+ab <- ab %>%
+  left_join(ewra_enter, by = c("game_pk", "pitcher_id", "inning"))
+```
+
+
+
+========Markov Chain Analysis Starts Here==============
+
+
+
+1. Stratified Count Approach (case study 1 -- 2019 WS G7)
+
+# Set up
+```{r}
+ab <- ab %>% arrange(game_date, game_pk, at_bat_number)
+
+# Bin the conditioning variables to better filter the case
+score_bin <- function(x) dplyr::case_when(
+  x < -3 ~ "trail_big",
+  x >= -3 & x <= -1 ~ "trail_small",
+  x ==  0 ~ "tie",
+  x >= 1 & x <= 3 ~ "lead_small",
+  x >  3 ~ "lead_big",
+  TRUE     ~ NA_character_
+)
+
+ewra_bin <- function(x) dplyr::case_when(
+  x < 0.7 ~ "good",
+  x < 1.5 ~ "ok", 
+  x >=  1.5 ~ "risky",
+  TRUE     ~ NA_character_
+)
+
+ab <- ab %>% 
+  mutate(score_bin = score_bin(pitch_score_diff),
+         ewra_bin = ewra_bin(EWRA_enter))
+```
+
+
+
+# scnario slices (For situations that are difficult to make decision)
+```{r}
+# Game context:
+# 1. Defensing team has small lead and starting pitcher in good condition
+# 2. Starter is a little tired (60-85 pitches) or 3rd+ time through the order
+
+score_ctx <- "lead_small"
+ewra_ctx <- "good"
+
+df_keep <- ab %>%
+  filter(score_bin == score_ctx,
+         ewra_bin == ewra_ctx,
+         pitcher_order == 1,
+         fatigue_min == 3 | n_thruorder_pitcher >= 3)
+
+# Sub: only keep the data of first time through the order
+df_sub <- ab %>%
+  filter(score_bin == score_ctx,
+         pitcher_order == 2,
+         n_thruorder_pitcher == 1)
+```
+
+
+
+# Build transition matrix by counts
+```{r}
+states <- sort(unique(c(ab$GameState, ab$end_GameState)))
+
+build_P <- function(df, states) {
+  starts <- df %>% count(GameState, name = "n_start")
+  pairs  <- df %>% count(GameState, end_GameState, name = "n_start_end")
+
+  trans <- expand.grid(GameState = states, end_GameState = states, stringsAsFactors = FALSE) %>%
+    left_join(starts, by = "GameState") %>%
+    left_join(pairs,  by = c("GameState","end_GameState")) %>%
+    
+    # keep count columns as integers
+    replace_na(list(n_start = 0, n_start_end = 0)) %>%
+    mutate(prob = if_else(n_start > 0, n_start_end / n_start, 0)) %>%
+    
+    # enforce absorbing state 3.000
+    mutate(prob = case_when(
+      GameState == "3.000" & end_GameState == "3.000" ~ 1,
+      GameState == "3.000" & end_GameState != "3.000" ~ 0,
+      TRUE ~ prob
+    ))
+  
+  
+  # row-normalization
+  row_sums <- trans %>%
+    group_by(GameState) %>%
+    summarise(rs = sum(prob), .groups = "drop")
+
+  trans <- trans %>%
+    left_join(row_sums, by = "GameState") %>%
+    mutate(prob = case_when(
+      GameState == "3.000" ~ prob,
+      rs > 0               ~ prob / rs,
+      TRUE                 ~ prob
+    )) %>%
+    select(GameState, end_GameState, prob)
+  
+
+ # Wide -> matrix in specified state order
+  mat <- trans %>%
+    tidyr::pivot_wider(names_from = end_GameState, values_from = prob) %>%
+    arrange(match(GameState, states))
+
+  P <- as.matrix(mat[, -1, drop = FALSE])
+  rownames(P) <- mat$GameState
+  P
+}
+
+# Transition matrices for keeping starter and substitute
+P_keep <- build_P(df_keep, states)
+P_sub  <- build_P(df_sub,  states)
+```
+
+
+
+# Simulation set up
+```{r}
+# Extract outs and base runners
+outs_of  <- function(st) as.integer(substr(st, 1, 1))
+bases_of <- function(st) sum(substr(st, 3, 5) == "1")
+
+# Simulate half inning with max steps of 30
+runs_in_half <- function(P, start_state = "0.000", max_steps = 30) {
+  state <- start_state; runs <- 0; steps <- 0
+  
+  while (state != "3.000" && steps < max_steps) {
+    probs <- P[state, ]
+    if (sum(probs) <= 0 || !is.finite(sum(probs))) break
+    O_start <- outs_of(state); B_start <- bases_of(state)
+    
+    # Pick next state based on transition probability
+    nxt <- sample(colnames(P), 1, prob = probs)
+    O_end <- outs_of(nxt);  B_end <- bases_of(nxt)
+    
+    # Calculate and update runs
+    runs <- runs + (O_start + B_start + 1) - (O_end + B_end)
+    state <- nxt; steps <- steps + 1
+  }
+  runs
+}
+
+# Calculate the mean of runs in every half inning simulated
+estimated_runs <- function(P, R = 5e4, start_state = "0.000") {
+  mean(replicate(R, runs_in_half(P, start_state)))
+}
+```
+
+
+
+```{r}
+set.seed(479)
+states0 <- setdiff(states, "3.000")
+
+# The estimated run diff between keep and sub (Substitution Advantage)
+# Positive => KEEP allows more runs than SUB (subbing is better)
+decision_map <- sapply(states0, function(st) {
+  estimated_runs(P_keep, start_state = st) -
+  estimated_runs(P_sub, start_state = st)
+})
+
+sort(decision_map)
+```
+
+
+# pivot wider to better visualize the result
+```{r}
+# Turn vector into a tibble
+df <- enframe(decision_map, name = "state", value = "value")
+
+# Split "O.BBB" into outs and bases
+df2 <- df %>%
+  separate(state, into = c("outs", "bases"), sep = "\\.", remove = FALSE) %>%
+  mutate(
+    outs  = as.integer(outs),
+    bases = as.character(bases)
+  )
+
+# Row order for bases
+base_order <- c(
+  "000","100","010","001",
+  "110","101","011","111"
+)
+
+# Pivot wider for visualization
+decision_wide <- df2 %>%
+  mutate(bases = fct_relevel(bases, base_order)) %>%
+  select(bases, outs, value) %>%
+  pivot_wider(
+    names_from = outs,
+    values_from = value,
+    names_prefix = "outs_"
+  ) %>%
+  arrange(bases)
+
+decision_wide
+```
+
+
+# heat map
+```{r}
+# Pivot longer to create heat map
+decision_long <- decision_wide %>%
+  pivot_longer(
+    cols = starts_with("outs_"),
+    names_to = "outs",
+    values_to = "value"
+  ) %>%
+  mutate(
+    outs = as.integer(gsub("outs_", "", outs)),
+    bases = factor(bases, levels = rev(base_order))
+  )
+
+# Plot
+ggplot(decision_long, aes(x = factor(outs), y = bases, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.3f", value))) +
+  scale_fill_gradient2(
+    low = "#0072B2", 
+    high = "#D55E00",
+    mid = "white",
+    midpoint = 0,
+    limits = c(-0.30, 0.30)
+  ) +
+  labs(
+    title = "Estimated Subtitution Advantage",
+    x = "Outs",
+    y = "Base State (BBB)",
+    fill = "Sub Adv (Runs)"
+  ) +
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+
+
+
+
+
+
+
+
+
