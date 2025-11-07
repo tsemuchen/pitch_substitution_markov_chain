@@ -214,779 +214,445 @@ To summarize a pitcher’s performance entering a new inning, we develop the Exp
 
 $$
 \begin{aligned}
-\text{EWRA}_0 &= 0, \\[6pt]
-\text{EWRA}_j &= \lambda \,\text{EWRA}_{j-1} + \text{SARA}_j, \\[6pt]
-\lambda &= 0.5^{\,1/h}, \qquad h = \text{half-life}, \\[12pt]
-\text{SARA}_j &= \min(\text{runs}_j, c) + \alpha \,\mathbf{1}\{\text{pitches}_j \ge 20\}, \\[6pt]
-c &= \text{run cap}.
+\text{EWRA}_0 &= 0, \\
+\text{EWRA}_i &= \lambda \cdot \text{EWRA}_{i-1} + \text{SARA}_{i}, \\
+\text{SARA} &= \min(\text{runs}, c) + \alpha \cdot \mathbf{1}\{\text{pitches} \ge 20\}, \\
+\lambda &= 0.5^{\tfrac{1}{h}}, \\
+h &= \text{half-life}, \\
+c &= \text{cap runs.}
 \end{aligned}
 $$
 
-We classify pitcher fatigue into five levels—Fresh, Settled-In, Working Load, Fatigued, and Redline. The thresholds between levels differ by role, since starters typically carry a higher pitch count than relievers(fg.1). To better filter the in-game circumstances, such as leading, trailing,  and pitcher’s performance entering the new inning, we classify the point difference into five levels and EWRA into three levels as well.(fg.2).
+We classify pitcher fatigue into five levels—Fresh, Settled-In, Working Load, Fatigued, and Redline. The thresholds between levels differ by role, since starters typically carry a higher pitch count than relievers. To better filter the in-game circumstances, such as leading, trailing,  and pitcher’s performance entering the new inning, we classify the score difference into five groups and EWRA into three groups as well.
 
-```
-#fatigue, point difference, EWRA level threshold
+Pitcher Fatigue Level Thresholds by Roles
 
-```
+| **Role**         | **Fresh** | **Settled-In** | **Working Load** | **Fatigued** | **Redline** |
+|------------------|-----------|----------------|------------------|---------------|--------------|
+| **Starter**       | 0–30      | 31–60          | 61–85            | 86–100        | 101+         |
+| **Long Reliever** | 0–20      | 21–40          | 41–55            | 56–70         | 71+          |
+| **Reliever**      | 0–15      | 16–25          | 26–35            | 36–45         | 46+          |
+
+
+Score Difference Binning
+| **Score Difference (Def − Off)** | **Group**      |
+|----------------------------------|----------------|
+| < −3                             | trail_big      |
+| −3 to −1                         | trail_small    |
+| 0                                | tie            |
+| 1 to 3                           | lead_small     |
+| > 3                              | lead_big       |
+
+EWRA Performance Binning
+| **EWRA Value (x)** | **Group** |
+|---------------------|------------|
+| x < 0.7             | good       |
+| 0.7 ≤ x < 1.5       | ok         |
+| x ≥ 1.5             | risky      |
 
 To compute run expectancy and game-state transition probabilities, we collapse pitch-level “game_seq” to the at-bat level, keeping the batter, starting base/out state, pitcher info, pitch count per AB, times through the order, and the pitcher’s fatigue level over the AB. In our Markov-chain analysis, we set 3.000 (three outs) as the absorbing state, and each AB has a current and next state label.
+
+Adding conditional variables
 ```
-# Get expected run 
+# Add pitching_team and establish strict ordering, pitch order
+game_seq <- game_seq %>%
+  mutate(
+    pitching_team = if_else(inning_topbot == "Top", home_team, away_team),
+    half = factor(inning_topbot, levels = c("Top", "Bot"))
+  ) %>%
+  arrange(game_pk, pitching_team, inning, half, at_bat_number, pitch_number) %>%
+  group_by(game_pk, pitching_team) %>%
+  mutate(row_in_group = row_number()) %>%
+  
+  # First appearance row for each pitcher within game_pk × pitching_team
+  group_by(game_pk, pitching_team, pitcher_id) %>%
+  mutate(first_row_for_pitcher = min(row_in_group)) %>%
+  ungroup() %>%
+  group_by(game_pk, pitching_team) %>%
+  mutate(pitcher_order = dense_rank(first_row_for_pitcher)) %>%
+  ungroup()
+
+# Pitch count
+game_seq <- game_seq %>%
+  # Make sure pitches are in true game order
+  mutate(half = factor(half, levels = c("Top", "Bot"))) %>% 
+  arrange(game_pk, pitcher_id, inning, half, at_bat_number, pitch_number) %>%
+  group_by(game_pk, pitcher_id) %>%
+  mutate(pitch_count = row_number()) %>%
+  ungroup()
+
+level_names <- c("Fresh", "Settled-In", "Working Load", "Fatigued", "Redline")
+
+# Fatigue level
+role_cuts <- tribble(
+  ~role,           ~c1, ~c2, ~c3, ~c4, ~c5,  # c5 is the "above" bucket
+  "starter",        30,   60,   85,  100, Inf,
+  "long_reliever",  20,   40,   55,   70, Inf,
+  "reliever",       15,   25,   35,   45, Inf
+)
+
+game_seq <- game_seq %>%
+  # Bring in the thresholds per pitcher
+  left_join(
+    pitcher_profile %>%
+      select(pitcher_id, role),
+    by = "pitcher_id"
+  ) %>%
+  left_join(role_cuts, by = "role") %>%
+  # Assign a fatigue label for each pitch (based on cumulative pitch_count)
+  mutate(fatigue_level = case_when(
+    pitch_count <= c1  ~ "Fresh",
+    pitch_count <= c2  ~ "Settled-In",
+    pitch_count <= c3  ~ "Working Load",
+    pitch_count <= c4  ~ "Fatigued",
+    pitch_count <= c5  ~ "Redline"
+  ),
+    # Ordered factor
+    fatigue_level = factor(fatigue_level, levels = level_names, ordered = TRUE),
+    # Numeric code 1–5
+    fatigue_level_num = as.integer(fatigue_level)
+  ) %>%
+  select(-c1, -c2, -c3, -c4, -c5)
+
+# Flip the sign of bat_score_diff for pitch_score_diff
+game_seq <-game_seq %>%  mutate(pitch_score_diff= bat_score_diff*-1)
+```
+
+Create AB dataset
+```
+ab <- game_seq %>%
+  group_by(game_pk, inning, at_bat_number, inning_topbot) %>%
+  summarise(
+    game_date          = first(game_date),
+    batter             = first(batter),
+    player_name        = first(player_name),
+    start_outs         = first(outs_when_up),
+    start_baserunners  = first(BaseRunner),
+    start_bat_score    = first(bat_score),
+    end_post_bat_score = last(post_bat_score),
+
+    # Pitcher info + fatigue over the AB
+    pitcher_id         = first(pitcher_id),
+    pitcher_order      = first(pitcher_order),
+    fatigue_min        = suppressWarnings(min(fatigue_level_num, na.rm = TRUE)),
+    fatigue_max        = suppressWarnings(max(fatigue_level_num, na.rm = TRUE)),
+    n_pitch_ab         = n(),
+    
+    n_thruorder_pitcher = first(n_thruorder_pitcher),
+    bat_score_diff       = first(bat_score_diff),
+    pitch_score_diff     = first(pitch_score_diff),
+    .groups = "drop"
+  ) %>%
+  # Re-group by half-inning so lead() looks within the half-inning
+  group_by(game_pk, inning, inning_topbot) %>%
+  arrange(at_bat_number, .by_group = TRUE) %>%
+  mutate(
+    # Next AB's start state
+    next_outs        = lead(start_outs),
+    next_baserunners = lead(start_baserunners),
+
+    # If next is missing (last ab in half-inning) or resets to 0.000 (new half-inning),
+    # Force absorbing 3.000 for this ab's end state
+    end_outs = ifelse(is.na(next_outs) | (next_outs == 0 & next_baserunners == "000"), 3L, next_outs),
+    end_baserunners = ifelse(is.na(next_baserunners) | (next_outs == 0 & next_baserunners == "000"), "000", next_baserunners),
+
+    GameState     = sprintf("%d.%s", start_outs, start_baserunners),
+    end_GameState = sprintf("%d.%s", end_outs,   end_baserunners)
+  ) %>%
+  ungroup()
+
+# Run scored against
+ab <- ab %>%
+  left_join(half_inning_scores, by = c("game_pk", "inning", "inning_topbot")) %>%
+  mutate(
+    runs_scored_in_ab      = end_post_bat_score - start_bat_score,
+    future_runs_from_start = half_inning_end_bat_score - start_bat_score
+  )
+```
+
+Exponential Weighted Run Allowed (EWRA)
+```
+half_life_inn <- 1.5       # h
+cap_runs      <- 3         # c
+stress_bump   <- 0.5       # alpha
+
+decay <- 0.5^(1/half_life_inn)  # lambda
+
+# Per-inning runs allowed + simple stress flag for each pitcher-game
+runs_by_inning <- ab %>%
+  group_by(game_pk, pitcher_id, inning, inning_topbot) %>%
+  summarise(
+    runs_allowed = sum(pmax(runs_scored_in_ab, 0), na.rm = TRUE),
+    n_pitch_ip    = sum(n_pitch_ab),
+    .groups = "drop_last"
+  ) %>%
+  arrange(game_pk, pitcher_id, inning) %>%
+  mutate(
+    runs_capped = pmin(runs_allowed, cap_runs),
+    stress_flag = as.integer(n_pitch_ip >= 20),
+    sara    = runs_capped + stress_bump * stress_flag # Stress-Adjusted Run Allowed (SARA)
+  )
+
+# 2) EWRA calculation
+ewra_enter <- runs_by_inning %>%
+  group_by(game_pk, pitcher_id) %>%
+  arrange(inning, .by_group = TRUE) %>%
+  mutate(
+    # accumulate over SARA to get EWRA at the END of each inning
+    EWRA_end = accumulate(sara, ~ .x * decay + .y, .init = 0) %>% tail(-1),
+    # entering the current inning = end of previous inning
+    EWRA_enter = dplyr::lag(EWRA_end, default = 0)
+  ) %>%
+  ungroup() %>%
+  select(game_pk, pitcher_id, inning, EWRA_enter)
+
+# join with ab
+ab <- ab %>%
+  left_join(ewra_enter, by = c("game_pk", "pitcher_id", "inning"))
+```
+
+Binning score difference & EWRA
+```
+ab <- ab %>% arrange(game_date, game_pk, at_bat_number)
+
+# Bin the conditioning variables to better filter the case
+score_bin <- function(x) dplyr::case_when(
+  x < -3 ~ "trail_big",
+  x >= -3 & x <= -1 ~ "trail_small",
+  x ==  0 ~ "tie",
+  x >= 1 & x <= 3 ~ "lead_small",
+  x >  3 ~ "lead_big",
+  TRUE     ~ NA_character_
+)
+
+ewra_bin <- function(x) dplyr::case_when(
+  x < 0.7 ~ "good",
+  x < 1.5 ~ "ok", 
+  x >=  1.5 ~ "risky",
+  TRUE     ~ NA_character_
+)
+
+ab <- ab %>% 
+  mutate(score_bin = score_bin(pitch_score_diff),
+         ewra_bin = ewra_bin(EWRA_enter))
 ```
 
 ### 2.2 Markov Chain Set Up
 
 We first  isolate the game situations that match the context we want to study: a small lead with the starter performing well under our EWRA metric. The “keep” dataset includes starters who are either at a moderate fatigue level or facing the lineup for the third time, capturing moments when managers often debate whether to leave the starter in. The “sub” dataset includes relievers who enter the game right after the starter and are facing the lineup for the first time, representing a typical fresh bullpen option.
-
 ```
-# scenario slices
+# Game context (only for this specific case, can be modified):
+# 1. Defensing team has small lead and starting pitcher in good condition.
+# 2. Starter is a little tired (60-85 pitches) or 3rd+ time through the order.
+
+score_ctx <- "lead_small"
+ewra_ctx <- "good"
+
+df_keep <- ab %>%
+  filter(score_bin == score_ctx,
+         ewra_bin == ewra_ctx,
+         pitcher_order == 1,
+         fatigue_min == 3 | n_thruorder_pitcher >= 3)
+
+# Sub: only keep the data of first time through the order
+df_sub <- ab %>%
+  filter(score_bin == score_ctx,
+         pitcher_order == 2,
+         n_thruorder_pitcher == 1)
 ```
 
-
-### 2.3 Data Preprocessing and Feature Selection
-
-To build a clean and informative dataset for model fitting, we first identified relevant variables, engineered new practical features, and removed noise from the raw data. One major challenge arose from combining the two half-courts, since the direction of play (left or right basket) does not affect shot quality. To standardize court orientation, we “flipped” all shots taken on the left side by multiplying both the x and y coordinates by −1 when x < 0, using (0, 0) as the center of the court.
-
-However, this introduced a new issue: shots taken from behind half court could be incorrectly mirrored, leading to inaccurate expected percentages. To address this, we first extracted distance information from the descriptive text before performing the flip. Because long-distance and beyond-half-court attempts are typically described explicitly, we could reliably identify and filter them out—these shots have very low success rates.
-
-Over-Half-Court Shot Success Rates
-| Distance Threshold | Make Percentage |
-|:-------------------|:----------------:|
-| 47 - 59 ft | 2.48% |
-| 60 - 74 ft | 1.68% |
-| > 75 ft | 0.00% |
-
-For cases where distance was missing, particularly for shots close to the basket, we manually calculated the missing distances using their exact coordinates to ensure accuracy.
+Then, we construct the transition matrices that describe how an inning typically progresses under each decision. Using the filtered datasets for keeping the starter and for bringing in a reliever, we count how often each game state moves to the next and convert those frequencies into transition probabilities. We also specify the inning-ending state as absorbing to ensure the simulation correctly terminates once three outs are reached. These probabilities are then arranged into transition matrices for the “keep” and “sub” scenarios, which serve as the foundation for all subsequent Monte Carlo simulations comparing expected run outcomes.
 ```
-# Shots expressed relative to the same basket
-half_court <- 47
-pbp_shot <- pbp_shot %>% 
-  mutate(
-    # Flip x,y for shots taken on the opposite half
-    x_aligned = ifelse(coordinate_x < 0, -coordinate_x, coordinate_x),
-    y_aligned = ifelse(coordinate_x < 0, -coordinate_y, coordinate_y),
+states <- sort(unique(c(ab$GameState, ab$end_GameState)))
+
+build_P <- function(df, states) {
+  starts <- df %>% count(GameState, name = "n_start")
+  pairs  <- df %>% count(GameState, end_GameState, name = "n_start_end")
+
+  trans <- expand.grid(GameState = states, end_GameState = states, stringsAsFactors = FALSE) %>%
+    left_join(starts, by = "GameState") %>%
+    left_join(pairs,  by = c("GameState","end_GameState")) %>%
     
-    # update missing distance
-    distance = ifelse(is.na(distance), sqrt((x_aligned-41.75)^2+y_aligned^2), distance)
-  ) %>% 
+    # keep count columns as integers
+    replace_na(list(n_start = 0, n_start_end = 0)) %>%
+    mutate(prob = if_else(n_start > 0, n_start_end / n_start, 0)) %>%
+    
+    # enforce absorbing state 3.000
+    mutate(prob = case_when(
+      GameState == "3.000" & end_GameState == "3.000" ~ 1,
+      GameState == "3.000" & end_GameState != "3.000" ~ 0,
+      TRUE ~ prob
+    ))
   
-   # Filter out half court shot here, can be added back if needed
-  dplyr::filter(distance <= half_court)
-```
-
-Other features included in our analysis are the shot type (e.g., jump shot, layup), point difference and game situation (whether the team was leading, trailing, or tied) at the time of the shot, as well as the quarter and time remaining in the quarter.
-```
-useful_columns <- c("id", "type_text", "text", "away_score", "home_score", "period_number",
-         "scoring_play", "score_value", "home_team_abbrev", "home_team_abbrev",
-         "away_team_abbrev", "coordinate_x", "coordinate_y", "start_quarter_seconds_remaining",
-         "team_id", "home_team_id" ,"away_team_id")
-
-# Limit to regular season, only shooting play
-pbp_shot <- pbp_raw %>%
-  dplyr::filter(season_type == 2, shooting_play)
-
-# Only keep columns that are useful for shot quality evaluation
-pbp_shot <- pbp_shot %>% 
-  dplyr::select(any_of(useful_columns)) %>% 
-  dplyr::filter(score_value != 1) %>%
-  mutate(distance = str_extract(text, "\\d+(?=-foot)") %>% as.numeric(),
-         shooter_home = if_else(team_id == home_team_id, 1, -1),
-         margin_before = if_else(shooter_home > 0,
-                                 (home_score - score_value) - away_score, 
-                                 home_score - (away_score - score_value)),
-         shooter_margin = shooter_home * margin_before)
-
-# Extract shot type from type_text
-pbp_shot <- pbp_shot %>%
-  mutate(shot_type = case_when(
-    str_detect(type_text, regex("dunk", ignore_case = TRUE)) ~ "Dunk",
-    str_detect(type_text, regex("layup", ignore_case = TRUE)) ~ "Layup",
-    str_detect(type_text, regex("tip", ignore_case = TRUE)) ~ "Tip",
-    str_detect(type_text, regex("hook", ignore_case = TRUE)) ~ "Hook",
-    str_detect(type_text, regex("free throw", ignore_case = TRUE)) ~ "Free Throw",
-    TRUE ~ "Jump Shot"
-  )) %>% 
-  filter(shot_type != "Free Throw")
-
-# Identify if the shot worth two or three
-pbp_shot <- pbp_shot %>%
-  mutate(
-    x_rot = y_aligned,
-    y_rot = 47 - x_aligned,
-    dist_rim    = sqrt((x_rot)^2 + (y_rot - rim_y)^2),
-    arc3     = (abs(x_rot) <  tp_corner & dist_rim >= tp_r),
-    non_arc3  = (abs(x_rot) >= tp_corner),
-    point_value = ifelse(arc3 | non_arc3, 3L, 2L),
-  ) %>%
-  select(-dist_rim, -non_arc3, -arc3)
-
-
-# Identify two_for_one shot case with already cleaned data, label first and second shot.
-pbp_shot <- pbp_shot %>%
-  mutate(two_for_one = case_when(
-    id %in% tfo_first$id  ~ 1,
-    id %in% tfo_second$id ~ 2,
-    TRUE                  ~ 0
-  ))
-```
-
-### 2.4  Shot Quality Model Developement
-Our first and baseline model was a generalized additive model (GAM) that used only the shot coordinates to evaluate shot quality.
-```
-gam_shot_base <- bam(
-  scoring_play ~ s(x_aligned, y_aligned),
-  data = train,
-  family = binomial(link = "logit")
-)
-```
-
-Then, we added other features to fit an extended GAM. 
-```
-gam_shot_extended <- bam(
-  scoring_play ~ 
-    s(x_aligned, y_aligned, k=100) + 
-    s(start_quarter_seconds_remaining, k=10) +
-    s(shooter_margin, k=10) + 
-    shot_type + 
-    period_number,
-  data = pbp_shot,
-  family = binomial(link = "logit")
-)
-```
-
-In addition to the two GAM models, we developed a hybrid model that combines the smooth interpretability of GAM with the predictive power of XGBoost. Specifically, we stacked the two approaches by using the expected percentage predicted by the base GAM as an additional input feature for the XGBoost model, alongside all other available variables. This design allows the hybrid model to capture both the smooth spatial patterns learned by the GAM and the complex nonlinear interactions identified by XGBoost.
-
-```
-# XGBoost training function
-train_xgb <- function(train_x, train_y,test_x, test_y){
-  dtrain <- xgb.DMatrix(data = train_x, label = train_y)
-  dtest  <- xgb.DMatrix(data = test_x,  label = test_y)
   
-  params <- list(
-    objective = "binary:logistic",
-    eval_metric = "logloss",
-    eta = 0.05,
-    max_depth = 4,
-    subsample = 0.8,
-    colsample_bytree = 0.8
-  )
+  # row-normalization
+  row_sums <- trans %>%
+    group_by(GameState) %>%
+    summarise(rs = sum(prob), .groups = "drop")
+
+  trans <- trans %>%
+    left_join(row_sums, by = "GameState") %>%
+    mutate(prob = case_when(
+      GameState == "3.000" ~ prob,
+      rs > 0               ~ prob / rs,
+      TRUE                 ~ prob
+    )) %>%
+    select(GameState, end_GameState, prob)
   
-  model <- xgb.train(
-    params = params,
-    data = dtrain,
-    nrounds = 300,
-    watchlist = list(train = dtrain, test = dtest),
-    early_stopping_rounds = 25,
-    verbose = 1
-  )
-  
-  return(model)
+
+ # Wide -> matrix in specified state order
+  mat <- trans %>%
+    tidyr::pivot_wider(names_from = end_GameState, values_from = prob) %>%
+    arrange(match(GameState, states))
+
+  P <- as.matrix(mat[, -1, drop = FALSE])
+  rownames(P) <- mat$GameState
+  P
 }
 
-
-# Create model matrices (numeric encoding for factors)
-train_x <- model.matrix(
-  scoring_play ~ pred_prob_base + shot_type + period_number +
-    start_quarter_seconds_remaining + shooter_margin,
-  data = train
-)
-train_y <- train$scoring_play
-
-test_x <- model.matrix(
-  scoring_play ~ pred_prob_base + shot_type + period_number +
-    start_quarter_seconds_remaining + shooter_margin,
-  data = test
-)
-test_y <- test$scoring_play
-
-pbp_xgb <- model.matrix(
-  scoring_play ~ pred_prob_base + shot_type + period_number +
-    start_quarter_seconds_remaining + shooter_margin,
-  data = pbp_shot
-)
-
-# train and evaluate xgb_hybrid
-xgb_hybrid <- train_xgb(train_x, train_y,test_x, test_y)
+# Transition matrices for keeping starter and substitute
+P_keep <- build_P(df_keep, states)
+P_sub  <- build_P(df_sub,  states)
 ```
 
-Lastly, we leveraged the full capabilities of XGBoost to build two additional models. The first model used all available features, consistent with the extended GAM, while the second replaced the x and y coordinates with the distance column. This allowed us to examine whether shot location still influences shot quality even when distance is held constant.
 
-XGBoost model with exact spatial data (x and y coordinate):
+### 2.3 Monte Carlo Simulation
+After creating the Markov chain transition matrices, we run a Monte Carlo simulation of half-innings. For each non-terminal game state, the code samples the next state according to its transition probabilities and updates the run total to reflect any scoring before stopping at three outs or a maximum step count. Repeating this process 5,000 times yields the estimated runs allowed under each decision: keeping the starter or substituting a reliever. 
 ```
-# Create model matrices (numeric encoding for factors)
-train_x <- model.matrix(
-  scoring_play ~ x_aligned + y_aligned + 
-    shot_type + period_number +
-    start_quarter_seconds_remaining + shooter_margin,
-  data = train
-)
-train_y <- train$scoring_play
+# Extract outs and base runners
+outs_of  <- function(st) as.integer(substr(st, 1, 1))
+bases_of <- function(st) sum(substr(st, 3, 5) == "1")
 
-test_x <- model.matrix(
-  scoring_play ~ x_aligned + y_aligned + 
-    shot_type + period_number +
-    start_quarter_seconds_remaining + shooter_margin,
-  data = test
-)
-test_y <- test$scoring_play
+# Simulate half inning with max steps of 30
+runs_in_half <- function(P, start_state = "0.000", max_steps = 30) {
+  state <- start_state; runs <- 0; steps <- 0
+  
+  while (state != "3.000" && steps < max_steps) {
+    probs <- P[state, ]
+    if (sum(probs) <= 0 || !is.finite(sum(probs))) break
+    O_start <- outs_of(state); B_start <- bases_of(state)
+    
+    # Pick next state based on transition probability
+    nxt <- sample(colnames(P), 1, prob = probs)
+    O_end <- outs_of(nxt);  B_end <- bases_of(nxt)
+    
+    # Calculate and update runs
+    runs <- runs + (O_start + B_start + 1) - (O_end + B_end)
+    state <- nxt; steps <- steps + 1
+  }
+  runs
+}
 
-pbp_xgb <- model.matrix(
-  scoring_play ~ x_aligned + y_aligned + 
-    shot_type + period_number +
-    start_quarter_seconds_remaining + shooter_margin,
-  data = pbp_shot
-)
-
-# train and evaluate xgb_no_spatial
-xgb_spatial <- train_xgb(train_x, train_y,test_x, test_y)
-```
-
-XGBoost model with distance
-```
-# Create model matrices (numeric encoding for factors)
-train_x <- model.matrix(
-  scoring_play ~ distance + shot_type + period_number +
-    start_quarter_seconds_remaining + shooter_margin,
-  data = train
-)
-train_y <- train$scoring_play
-
-test_x <- model.matrix(
-  scoring_play ~  distance + shot_type + period_number +
-    start_quarter_seconds_remaining + shooter_margin,
-  data = test
-)
-test_y <- test$scoring_play
-
-pbp_xgb <- model.matrix(
-  scoring_play ~  distance + shot_type + period_number +
-    start_quarter_seconds_remaining + shooter_margin,
-  data = pbp_shot
-)
-
-# train and evaluate xgb_dist
-xgb_dist <- train_xgb(train_x, train_y,test_x, test_y)
+# Calculate the mean of runs in every half inning simulated
+estimated_runs <- function(P, R = 5e4, start_state = "0.000") {
+  mean(replicate(R, runs_in_half(P, start_state)))
+}
 ```
 
----
+We further take the difference between these two estimates (keep − sub) for every possible starting state to produce a decision map, which summarizes the estimated run impact of each choice across all outs-and-bases configurations. The values in this map serve as a substitution advantage indicator (SAI) to help people interpret positive and negative values. A positive SAI indicates that bringing in the reliever is expected to allow fewer runs, while a negative SAI  suggests that keeping the starter is more advantageous.
+```
+set.seed(479)
+states0 <- setdiff(states, "3.000")
+
+# The estimated run diff between keep and sub (Substitution Advantage)
+# Positive => KEEP allows more runs than SUB (subbing is better)
+decision_map <- sapply(states0, function(st) {
+  estimated_runs(P_keep, start_state = st) -
+  estimated_runs(P_sub, start_state = st)
+})
+```
 
 ### 3. Main Results
-On average, teams employing the strategy yield a positive 1.03 point advantage according to our histogram below. While many individual outcomes are neutral or negative, the positive outcomes are significant enough to make the strategy worthwhile on average.
-```
-# find for all shooting plays from team one, first and second shot of the two for one possession 
-two_for_one_keys <- validated_sequences %>%
-  distinct(game_id, period_number)
-
-all_two_for_one_pbps <- pbp_with_shot_clock %>%
-  semi_join(two_for_one_keys, by = c("game_id", "period_number")) %>%
-  filter(seconds_remaining_qtr <= 42) 
-
-#order the possession and extract first shot and second for team 1
-team1_possession_ranks <- all_two_for_one_pbps %>%
-  left_join(select(validated_sequences, game_id, period_number, team1), by = c("game_id", "period_number")) %>%
-  filter(team_abbreviation == team1) %>%
-  distinct(game_id, period_number, possession_id) %>%
-  group_by(game_id, period_number) %>%
-  mutate(team1_poss_rank = rank(possession_id, ties.method = "first")) %>%
-  ungroup()
-
-team1_first_shots <- all_two_for_one_pbps %>%
-  semi_join(filter(team1_possession_ranks, team1_poss_rank == 1), 
-            by = c("game_id", "period_number", "possession_id")) %>%
-  filter(is_shot_attempt == TRUE &
-           seconds_remaining_qtr >= 28 & 
-           seconds_remaining_qtr <= 40 & 
-           !stringr::str_detect(type_text, "Free Throw"))
-
-team1_second_shots <- all_two_for_one_pbps %>%
-  semi_join(filter(team1_possession_ranks, team1_poss_rank == 2), 
-            by = c("game_id", "period_number", "possession_id")) %>%
-  filter(is_shot_attempt == TRUE & !stringr::str_detect(type_text, "Free Throw"))
-```
-```
-ggplot(validated_sequences, aes(x = point_differential)) +
-    geom_histogram(binwidth = 1, fill = "#0072B2", color = "white", alpha = 0.8) +
-    geom_vline(
-        aes(xintercept = mean(point_differential)), 
-        color = "red", 
-        linetype = "dashed", 
-        linewidth = 1,
-        alpha = 0.5 
-    ) +
-    geom_text(
-        aes(
-            x = mean(point_differential), 
-            y = Inf,
-            label = paste("Mean =", round(mean(point_differential), 2))
-        ),
-        vjust = 2, hjust = -0.1, color = "red"
-    ) +
-    labs(
-        title = "Two-for-One Overall Result",
-        x = "Point Differential",
-        y = "Number of Sequences"
-    ) +
-    theme_minimal() +
-    theme(
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()
-    )
-```
+In the 2019 case, we simulated a comparable situation: holding a small lead, a moderate fatigue level, strong performance entering the inning,  and the pitcher facing the lineup for a third time. Based on our result, with one out and a runner on first in this scenario, removing Greinke would on average cost the team an additional 0.109 runs by the end of the inning, a result that contradicts Hinch’s 2019 decision. In other words, our model suggests that Greinke should have remained in to finish the inning, or at least to face the next one or two batters. When examining the graph as a whole, in these pitching circumstances, our model tends to favor replacing the starter if exactly two runners reach bases, since keeping him in elevates the risk of allowing additional runs.
 <p align="center">
-  <img src="plots/Two-for-One_Overall_Result-1.png" width="450">
+  <img src=".png" width="450">
   <br>
-  <em>Figure 1. Two-for-One overall Result</em>
+  <em>Figure 1. Estimated Substitution Advantage (keep_run_est - sub_run_est)</em>
 </p>
 
-
-However, when using the strategy, both shots, especially the second one, are often rushed, leading teams to settle for lower-quality attempts.To understand the trade-off, we analyze the location and type of shots taken. We generate a dataset that captures all the shooting play-by-play data from the validated sequence in the step 2.1. The following histogram and shot charts visualize the initiating team’s shooting preference and the location of all "first shots" and "second shots". There isn’t a significant difference between two shots in terms of their shooting preference and location. 
+Code for visiualizatoin
 ```
-# distance analysis
+# Turn vector into a tibble
+df <- enframe(decision_map, name = "state", value = "value")
 
-team1_first_shots <- team1_first_shots %>% 
+# Split "O.BBB" into outs and bases
+df2 <- df %>%
+  separate(state, into = c("outs", "bases"), sep = "\\.", remove = FALSE) %>%
   mutate(
-    distance = str_extract(text, "\\d+(?=-foot)") %>% as.numeric(),
-    x_aligned = ifelse(coordinate_x < 0, -coordinate_x, coordinate_x),
-    y_aligned = ifelse(coordinate_x < 0, -coordinate_y, coordinate_y),
-    distance = ifelse(is.na(distance), sqrt((x_aligned-41.75)^2+y_aligned^2), distance)) %>%
-  mutate(
-    # create categories for different shot zones
-    shot_zone = case_when(
-      points_scored == 3 ~ "Three Pointer",
-      distance <= 6      ~ "At The Rim",
-      distance > 6 & distance < 16 ~ "Mid-Range",
-      distance >= 16 & distance <= 21 ~ "Long Two",
-      TRUE ~ "Three Pointer" 
-    ),
-    shot_zone = factor(shot_zone, levels = c("At The Rim", "Mid-Range", "Long Two", "Three Pointer")))%>%
-  mutate(shot_made = score_value > 0)
+    outs  = as.integer(outs),
+    bases = as.character(bases)
+  )
 
-
-team1_second_shots <- team1_second_shots %>% 
-  mutate(
-    distance = str_extract(text, "\\d+(?=-foot)") %>% as.numeric(),
-    # Flip x,y for shots taken on the opposite half
-    x_aligned = ifelse(coordinate_x < 0, -coordinate_x, coordinate_x),
-    y_aligned = ifelse(coordinate_x < 0, -coordinate_y, coordinate_y),
-    distance = ifelse(is.na(distance), sqrt((x_aligned-41.75)^2+y_aligned^2), distance)) %>%
-  mutate(
-    # create categories for different shot zones
-    shot_zone = case_when(
-      points_scored == 3 ~ "Three Pointer",
-      distance <= 6      ~ "At The Rim",
-      distance > 6 & distance < 16 ~ "Mid-Range",
-      distance >= 16 & distance <= 21 ~ "Long Two",
-      TRUE ~ "Three Pointer" 
-    ),
-    shot_zone = factor(shot_zone, levels = c("At The Rim", "Mid-Range", "Long Two", "Three Pointer"))) %>%
-  mutate(shot_made = score_value > 0)
-
-```
-```
-# shot zone comparison 
-shots_combined <- bind_rows(
-    team1_first_shots %>% mutate(group = "First Shots"),
-    team1_second_shots %>% mutate(group = "Second Shots")
+# Row order for bases
+base_order <- c(
+  "000","100","010","001",
+  "110","101","011","111"
 )
 
-shot_percentages <- shots_combined %>%
-    group_by(group, shot_zone) %>%
-    summarise(count = n(), .groups = "drop") %>%
-    group_by(group) %>%
-    mutate(percent = count / sum(count) * 100)
-
-shot_order <- shot_percentages %>%
-    group_by(shot_zone) %>%
-    summarise(avg_percent = mean(percent)) %>%
-    arrange(-avg_percent) %>%
-    pull(shot_zone)
-
-ggplot(shot_percentages, aes(x = factor(shot_zone, levels = shot_order), 
-                             y = percent, fill = group)) +
-    geom_col(position = "dodge", alpha = 0.9) + 
-    scale_fill_manual(values = c("First Shots" = "#8DB6CD", 
-                                 "Second Shots" = "#CD5C5C")) +  
-    labs(
-        title = "Shot Type Comparison",
-       # x = "Shot Type",
-        y = "Percentage (%)",
-        fill = "Shot Type"
-    ) +
-    theme_minimal() +
-    theme(
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()
-    )
-
-
-```
-<p align="center">
-  <img src="plots/shot_type_comparison.png" width="450">
-  <br>
-  <em>Figure 2. Shot Type Comparison</em>
-</p>
-
-```
-
-shot_colors <- c("TRUE" = "#00B050", "FALSE" = "#FF0000") 
-shot_shapes <- c("TRUE" = 1, "FALSE" = 4)
-line_col <- "gray30"
-my_transparent_blue <- rgb(173/255, 216/255, 230/255, alpha = 0.5)
-
-
-# court dimensions
-half_len <- 47
-half_wid <- 50
-rim_y    <- 5.25
-rim_r    <- 0.75
-lane_hw  <- 8
-ft_y     <- 19
-ft_r     <- 6
-ra_r     <- 4
-tp_r     <- 23.75
-tp_corner <- 22
-tp_tan_y  <- rim_y + sqrt(tp_r^2 - tp_corner^2)
-
-# geometry data frames
-theta <- seq(0, 2*pi, length.out = 400)
-rim <- data.frame(x = 0 + rim_r * cos(theta), y = rim_y + rim_r * sin(theta))
-theta_ra <- seq(0, pi, length.out = 200)
-ra_arc <- data.frame(x = 0 + ra_r * cos(theta_ra), y = rim_y + ra_r * sin(theta_ra))
-ft_line <- data.frame(x=-lane_hw, y=ft_y, x2=lane_hw, y2=ft_y)
-ft_circle <- data.frame(theta = theta, x = 0 + ft_r * cos(theta), y = ft_y + ft_r * sin(theta))
-ft_circle_top <- ft_circle %>% filter(theta >= 0 & theta <= pi) %>% arrange(theta)
-ft_circle_bottom <- ft_circle %>% filter(theta > pi & theta < 2*pi) %>% arrange(theta)
-lane_lines <- data.frame(x  = c(-lane_hw,  lane_hw, -lane_hw,  lane_hw), y  = c(0, 0, ft_y, ft_y), x2 = c(-lane_hw,  lane_hw, -lane_hw,  lane_hw), y2 = c(ft_y, ft_y, 0, 0))
-theta_left  <- pi - acos(tp_corner / tp_r)
-theta_right <-      acos(tp_corner / tp_r)
-theta_tp <- seq(theta_left, theta_right, length.out = 400)
-tp_arc <- data.frame(x = 0 + tp_r * cos(theta_tp), y = rim_y + tp_r * sin(theta_tp))
-corner_lines <- data.frame(x  = c(-tp_corner,  tp_corner), x2 = c(-tp_corner,  tp_corner), y  = c(0, 0), y2 = c(tp_tan_y, tp_tan_y))
-
-# first shot distribution 
-ggplot() +
-    geom_segment(aes(x = -25, y = 0, xend = 25, yend = 0), colour = line_col) +
-    geom_segment(aes(x = -25, y = 47, xend = 25, yend = 47), colour = line_col) +
-    geom_segment(aes(x = -25, y = 0, xend = -25, yend = 47), colour = line_col) +
-    geom_segment(aes(x = 25, y = 0, xend = 25, yend = 47), colour = line_col) +
-    geom_segment(data = lane_lines, aes(x = x, y = y, xend = x2, yend = y2), colour = line_col) +
-    geom_path(data = ft_circle_top, aes(x = x, y = y), colour = line_col) +
-    geom_path(data = ft_circle_bottom, aes(x = x, y = y), colour = line_col, linetype = "dashed") +
-    geom_segment(data = ft_line, aes(x = x, y = y, xend = x2, yend = y2), colour = line_col) +
-    geom_path(data = rim, aes(x = x, y = y), linewidth = 1) +
-    geom_path(data = ra_arc, aes(x = x, y = y), colour = line_col) +
-    geom_segment(data = corner_lines, aes(x = x, y = y, xend = x2, yend = y2), colour = line_col) +
-    geom_path(data = tp_arc, aes(x = x, y = y), colour = line_col) +
-    
-    geom_point(
-        data = team1_first_shots, 
-        aes(x = y_aligned, y = 47 - x_aligned, color = shot_made, shape = shot_made), 
-        alpha = 0.6, 
-        size = 3,    
-        stroke = 1.2 
-    ) +
-    
-    scale_color_manual(values = shot_colors, name = "Shot Outcome", labels = c("Missed", "Made")) +
-    scale_shape_manual(values = shot_shapes, name = "Shot Outcome", labels = c("Missed", "Made")) +
-    
-    coord_fixed(ylim = c(-2, 50), xlim = c(-27, 27)) +
-    theme_void() +
-    labs(title = "Two-for-One First Shot Attempts") +
-    theme(plot.title = element_text(hjust = 0.5, face = "bold"), plot.background = element_rect(fill = "white", color = NA))
-
-```
-```
-
-# second shot distribution 
-ggplot() +
-    geom_segment(aes(x = -25, y = 0, xend = 25, yend = 0), colour = line_col) +
-    geom_segment(aes(x = -25, y = 47, xend = 25, yend = 47), colour = line_col) +
-    geom_segment(aes(x = -25, y = 0, xend = -25, yend = 47), colour = line_col) +
-    geom_segment(aes(x = 25, y = 0, xend = 25, yend = 47), colour = line_col) +
-    geom_segment(data = lane_lines, aes(x = x, y = y, xend = x2, yend = y2), colour = line_col) +
-    geom_path(data = ft_circle_top, aes(x = x, y = y), colour = line_col) +
-    geom_path(data = ft_circle_bottom, aes(x = x, y = y), colour = line_col, linetype = "dashed") +
-    geom_segment(data = ft_line, aes(x = x, y = y, xend = x2, yend = y2), colour = line_col) +
-    geom_path(data = rim, aes(x = x, y = y), linewidth = 1) +
-    geom_path(data = ra_arc, aes(x = x, y = y), colour = line_col) +
-    geom_segment(data = corner_lines, aes(x = x, y = y, xend = x2, yend = y2), colour = line_col) +
-    geom_path(data = tp_arc, aes(x = x, y = y), colour = line_col) +
-    
-    geom_point(
-        data = team1_second_shots, 
-        aes(x = y_aligned, y = 47 - x_aligned, color = shot_made, shape = shot_made), 
-        alpha = 0.6, 
-        size = 3,    
-        stroke = 1.2 
-    ) +
-    
-    scale_color_manual(values = shot_colors, name = "Shot Outcome", labels = c("Missed", "Made")) +
-    scale_shape_manual(values = shot_shapes, name = "Shot Outcome", labels = c("Missed", "Made")) +
-    
-    coord_fixed(ylim = c(-2, 50), xlim = c(-27, 27)) +
-    theme_void() +
-    labs(title = "Two-for-One Second Shot Attempts") +
-    theme(plot.title = element_text(hjust = 0.5, face = "bold"), plot.background = element_rect(fill = "white", color = NA))
-```
-<p align="center">
-  <img src="plots/first_shot_attempts.png" width="400">
-  <img src="plots/second_002.png" width="400">
-  <br>
-  <em>Figure 3. Shot attempt locations: first vs. second TFO shots.</em>
-</p>
-
-
-Before showing model prediction, we also generated a shot map using the base GAM to visualize the expected shooting percentage and expected points across the court. The results aligned with current NBA trends, highlighting that teams prioritize three-point attempts and shots near the basket, as these yield the highest points per attempt.
-
-Court dimension and lines
-```
-# Dimensions & refs (ft)
-half_len <- 47      # baseline (0) to half-court (47)
-half_wid <- 50      # sideline to sideline (-25..25)
-rim_y   <- 5.25     # rim center is 5.25 ft from baseline
-rim_r   <- 0.75     # rim radius ~ 9 in ≈ 0.75 ft
-lane_hw <- 8        # lane half-width (key width = 16)
-ft_y    <- 19       # free-throw line from baseline
-ft_r    <- 6        # FT circle radius
-ra_r    <- 4        # restricted area radius
-tp_r    <- 23.75    # 3PT arc radius
-tp_corner <- 22     # corner distance
-tp_tan_y  <- rim_y + sqrt(tp_r^2 - tp_corner^2)  # where arc meets the corner lines
-
-
-# Geometry (in rotated coords)
-theta <- seq(0, 2*pi, length.out = 400)
-
-# Rim
-rim <- data.frame(
-  x = 0 + rim_r * cos(theta),
-  y = rim_y + rim_r * sin(theta)
-)
-
-# Restricted area semicircle
-theta_ra <- seq(0, pi, length.out = 200)
-ra_arc <- data.frame(
-  x = 0 + ra_r * cos(theta_ra),
-  y = rim_y + ra_r * sin(theta_ra)
-)
-
-# FT line & circle
-ft_line <- data.frame(x=-lane_hw, y=ft_y, x2=lane_hw, y2=ft_y)
-
-theta <- seq(0, 2*pi, length.out = 400)
-ft_circle <- data.frame(
-  theta = theta,
-  x = 0 + ft_r * cos(theta),
-  y = ft_y + ft_r * sin(theta)
-)
-
-ft_circle_top    <- ft_circle %>% 
-  dplyr::filter(theta >= 0   & theta <= pi) %>% 
-  arrange(theta)
-ft_circle_bottom <- ft_circle %>%  
-  dplyr::filter(theta >  pi  & theta <  2*pi)  %>% 
-  arrange(theta)
-
-# Lane (paint) rectangle edges
-lane_lines <- data.frame(
-  x  = c(-lane_hw,  lane_hw, -lane_hw,  lane_hw),
-  y  = c(0, 0, ft_y, ft_y),
-  x2 = c(-lane_hw,  lane_hw, -lane_hw,  lane_hw),
-  y2 = c(ft_y, ft_y, 0, 0)
-)
-
-# 3PT arc (clipped to meet corners at |x| = 22)
-theta_left  <- pi - acos(tp_corner / tp_r)
-theta_right <-       acos(tp_corner / tp_r)
-theta_tp <- seq(theta_left, theta_right, length.out = 400)
-tp_arc <- data.frame(
-  x = 0 + tp_r * cos(theta_tp),
-  y = rim_y + tp_r * sin(theta_tp)
-)
-
-# Corner-3 verticals up to tangency height
-tp_tan_y <- rim_y + sqrt(tp_r^2 - tp_corner^2)
-corner_lines <- data.frame(
-  x  = c(-tp_corner,  tp_corner),
-  x2 = c(-tp_corner,  tp_corner),
-  y  = c(0, 0),
-  y2 = c(tp_tan_y, tp_tan_y)
-)
-```
-
-Predict on half court grid
-```
-grid_step <- 0.5
-grid <- expand.grid(
-  x_aligned = seq(0, 47, by = grid_step),
-  y_aligned = seq(-25, 25, by = grid_step)
-)
-
-# Rotate 90 degree clockwise (basket at bottom)
-grid <- grid %>%
-  mutate(x_rot = y_aligned,
-         y_rot = 47 - x_aligned)
-
-grid$pred_prob <- predict(gam_shot_base, newdata = grid, type = "response")
-
-# Compute expected points
-# Infer 3PT vs 2PT by geometry, then compute EP = p(make) * points
-grid <- grid %>%
-  mutate(
-    dist_rim    = sqrt((x_rot)^2 + (y_rot - rim_y)^2),
-    arc3     = (abs(x_rot) <  tp_corner & dist_rim >= tp_r),
-    non_arc3  = (abs(x_rot) >= tp_corner),
-    point_value = ifelse(arc3 | non_arc3, 3L, 2L),
-    exp_points  = pred_prob * point_value
+# Pivot wider for visualization
+decision_wide <- df2 %>%
+  mutate(bases = fct_relevel(bases, base_order)) %>%
+  select(bases, outs, value) %>%
+  pivot_wider(
+    names_from = outs,
+    values_from = value,
+    names_prefix = "outs_"
   ) %>%
-  select(-dist_rim, -non_arc3, -arc3)
+  arrange(bases)
+
+# Pivot longer to create heat map
+decision_long <- decision_wide %>%
+  pivot_longer(
+    cols = starts_with("outs_"),
+    names_to = "outs",
+    values_to = "value"
+  ) %>%
+  mutate(
+    outs = as.integer(gsub("outs_", "", outs)),
+    bases = factor(bases, levels = rev(base_order))
+  )
+
+# Plot
+ggplot(decision_long, aes(x = factor(outs), y = bases, fill = value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.3f", value))) +
+  scale_fill_gradient2(
+    low = "#0072B2", 
+    high = "#D55E00",
+    mid = "white",
+    midpoint = 0,
+    limits = c(-0.30, 0.30)
+  ) +
+  labs(
+    title = "Estimated Subtitution Advantage",
+    x = "Outs",
+    y = "Base State (BBB)",
+    fill = "Sub Adv (Runs)"
+  ) +
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5))
 ```
-
-Visualization
-```
-line_col <- "gray30"
-
-
-plot_surface <- function(col, plot_name,
-                         palette = colorBlindness::Blue2DarkRed18Steps,
-                         percent_scale = FALSE,
-                         limits = NULL) {
-  # col: string name of the column in `grid` to fill by (e.g., "pred_prob", "exp_points")
-
-  ggplot() +
-    geom_raster(
-      data = grid,
-      aes(x = x_rot, y = y_rot, fill = .data[[col]]),
-      interpolate = TRUE
-    ) +
-    {
-      if (percent_scale) {
-        scale_fill_gradientn(
-          colours = palette,
-          name = plot_name,
-          limits = if (is.null(limits)) c(0, 1) else limits,
-          labels = percent_format(accuracy = 1)
-        )
-      } else {
-        scale_fill_gradientn(
-          colours = palette,
-          name = plot_name,
-          limits = limits
-        )
-      }
-    } +
-    coord_fixed(
-      xlim = c(-half_wid/2 - 5, half_wid/2 + 5),
-      ylim = c(-3, half_len + 3),
-      expand = FALSE
-    ) +
-    
-    # Boundaries (sidelines & baselines)
-    geom_segment(aes(x = -half_wid/2, y = 0,        xend =  half_wid/2, yend = 0),
-                 colour = line_col, linewidth = 1, inherit.aes = FALSE) +
-    geom_segment(aes(x = -half_wid/2, y = half_len, xend =  half_wid/2, yend = half_len),
-                 colour = line_col, linewidth = 1, inherit.aes = FALSE) +
-    geom_segment(aes(x = -half_wid/2, y = 0,        xend = -half_wid/2, yend = half_len),
-                 colour = line_col, linewidth = 1, inherit.aes = FALSE) +
-    geom_segment(aes(x =  half_wid/2, y = 0,        xend =  half_wid/2, yend = half_len),
-                 colour = line_col, linewidth = 1, inherit.aes = FALSE) +
-    
-    # Lane, FT line, FT circle
-    geom_segment(data = lane_lines, aes(x = x, y = y, xend = x2, yend = y2),
-             colour = line_col, linewidth = 1, inherit.aes = FALSE) +
-    geom_path(data = ft_circle_top, aes(x = x, y = y),
-          colour = line_col, linewidth = 1, inherit.aes = FALSE) +
-    geom_path(data = ft_circle_bottom, aes(x = x, y = y),
-          colour = line_col, linewidth = 1, linetype = "dashed", inherit.aes = FALSE) +
-    geom_segment(data = ft_line, aes(x = x, y = y, xend = x2, yend = y2),  # draw last
-             colour = line_col, linewidth = 1, inherit.aes = FALSE) +
-  
-    # Rim + restricted arc
-    geom_path(data = rim, aes(x = x, y = y),
-              colour = line_col, linewidth = 1.2, inherit.aes = FALSE) +
-    geom_path(data = ra_arc, aes(x = x, y = y),
-              colour = line_col, linewidth = 1, inherit.aes = FALSE) +
-    
-    # 3PT lines + arc
-    geom_segment(data = corner_lines, aes(x = x, y = y, xend = x2, yend = y2),
-                 colour = line_col, linewidth = 1, inherit.aes = FALSE) +
-    geom_path(data = tp_arc, aes(x = x, y = y),
-              colour = line_col, linewidth = 1, inherit.aes = FALSE) +
-    labs(title = paste("Base GAM", plot_name), x = NULL, y = NULL) +
-    theme_void(base_size = 12) +
-    theme(
-      plot.title = element_text(hjust = 0.5, face = "bold"),
-      legend.position = "right",
-      legend.title = element_text(face = "bold")
-    )
-}
-
-# Call function
-# FG%
-plot_surface("pred_prob", "Expected FG%", percent_scale = TRUE)
-
-# Expected points
-plot_surface("exp_points", "Expected Points", percent_scale = FALSE)
-```
-
-<p align="center">
-  <img src="plots/gam_base_xFG_perc.png" width="600">
-  <img src="plots/gam_base_xPts.png" width="600">
-  <br>
-  <em>Figure 4. Base GAM models: 1. xFG% 2. xPts</em>
-</p>
-
-
-Across all evaluation metrics, model performance improved progressively from the base GAM to more advanced models. The extended GAM showed modest gains over the base version, indicating that adding contextual features such as shot type and game situation slightly enhanced prediction accuracy. The XGBoost models further improved calibration and discrimination, with the XGB Distance model achieving the best overall results (AUC = 0.693, Log Loss = 0.620, Brier = 0.217). This suggests that shot distance alone is a highly informative predictor of shot quality, capturing much of the spatial variation even more effectively than raw coordinates. 
-
-| Model         | AUC   | Log Loss | MSE |
-|----------------|:-----:|:---------:|:------:|
-| GAM (Base)     | 0.642 | 0.654     | 0.231  |
-| GAM (Extended) | 0.657 | 0.639     | 0.225  |
-| XGB Hybrid     | 0.655 | 0.639     | 0.225  |
-| XGB Spatial    | 0.658 | 0.639     | 0.225  |
-| **XGB Distance** | **0.693** | **0.620** | **0.217** |
-
-Model predictions show a clear decline in shot quality during Two-For-One (TFO) situations. Non-TFO shots have the highest expected percentages (54% for two-pointers and 36% for three-pointers), while both the first and especially the second TFO shots show lower predicted make rates. The second TFO three-pointer drops most sharply, averaging around 30%. This indicates that teams tend to rush their TFO attempts, particularly the second shot, resulting in reduced shot quality, even though the overall strategy remains beneficial due to the extra possession gained.
-
-Expected percentage for 2 pointers:
-| Context  | gam_base | gam_extended | hybrid | xgb_spatial | xgb_dist |
-|:----------|:---------:|:-------------:|:--------:|:-------------:|:----------:|
-| **League AVG** | 54.6% | 54.5% | 54.1% | 54.4% | 54.5% |
-| **TFO 1st**    | 52.2% | 50.8% | 51.6% | 51.9% | 52.7% |
-| **TFO 2nd**    | 52.4% | 47.4% | 48.1% | 48.5% | 48.5% |
-
-
-Expected percentage for 3 pointers:
-| Context  | gam_base | gam_extended | hybrid | xgb_spatial | xgb_dist |
-|:----------|:---------:|:-------------:|:--------:|:-------------:|:----------:|
-| **League AVG** | 36.0% | 36.2% | 36.7% | 36.4% | 36.3% |
-| **TFO 1st**    | 36.0% | 33.9% | 35.3% | 35.1% | 35.2% |
-| **TFO 2nd**    | 35.5% | 29.5% | 29.2% | 28.8% | 29.3% |
-
-
----
 
 ### 4. Limitation and Further Development
 
 ### 4.1 Limitation
-First, the method for identifying two-for-one possessions is based on a strict, time-based heuristic. This approach cannot fully capture every intended two-for-one possession, as it measures the outcome of a sequence rather than the players' intent. Second, the shot quality assessment is based on proxies like shot location and distance, which are available in standard play-by-play data. However, our model does not account for several critical contextual variables. The most significant of these is defender proximity, as an open shot is fundamentally different from a contested one. Additionally, nuanced shot clock situations, such as the difference between a planned shot early in the clock and a rushed one as it expires, are not explicitly modeled.
+Our condition variables are mostly constructed without advanced tracking data, and  rely heavily on intuitive judgments based on our personal understanding of the game, leaving them without statistical validation and susceptible to bias. Furthermore, our variable bins cannot fully represent every live game context, and some situations are not captured in the play-by-play data. For instance, a starter who throws only 30 pitches in the World Series might still be fatigued if he logged a high pitch count in yesterday’s game. Factors such as pitcher’s repertoire, platoon, and late game strategies are also crucial when evaluating at-bat level data but are not explicitly modeled here.
+
+Although our experiments focus on a single set of game context, the framework itself is flexible and can be adapted to many other scenarios. This adaptability makes it a useful tool for exploring substitution strategies across a wide range of game conditions.
 
 ### 4.2 Further Development
 
-Develop an Enhanced Shot Quality Mode
-Feature engineering with a more comprehensive data to enhanced shot quality model
- - defender_distance: The distance to the nearest defender.
- - Shot_type_detailed: Differentiate between catch-and-shoot, pull-up, and off-the-dribble shots.
+Feature engineering with more comprehensive data to enhance estimation models.
+ - Repertoire: The collection of different pitches a pitcher can throw.
+ -   With runners on base, pitchers with high strikeout rates, often those who rely on a high-velocity four-seam fastball, are preferred.
+ - Platoon decision: Lefty or righty
+ -   Pitchers generally have an advantage when facing hitters of the same  handedness.
+ - Run allowed in this inning
+ -   The Markov chain simulation of a half-inning cannot account for runs allowed earlier in the same inning before reaching a given state.
 
-Perform a Historical Trend Analysis of Two-for-One
- - Acquire play-by-play data for multiple past NBA seasons 
- - Run the same/new validation script on each season's data to calculate the frequency of two-for-one attempts year over year and present with visualization 
-
-
-
-
+Build an in-game recommendation tool to evaluate bullpen options across different scenarios
+ - Add bullpen availability / fatigue tables for coaching staff that helps them find the best choice.
+ - Develop and validate a model that accounts for game importance during regular and post season games
 
 
 
