@@ -216,14 +216,14 @@ To summarize a pitcher’s performance entering a new inning, we develop the Exp
   
 $$
 \begin{aligned}
-\textbf{EWRA}_0 &= 0, \\
-\textbf{EWRA}_i &= \boldsymbol{\lambda} \cdot \textbf{EWRA}_{i-1} + \textbf{SARA}_{i}, \\
-\textbf{SARA}_i &= \min(\text{runs}_i, \mathbf{c}) + \boldsymbol{\alpha} \cdot \mathbf{1}{\{\text{pitches} \ge 20\}}, \\
-\mathbf{i} &= \text{i-th inning}, \\
-\boldsymbol{\lambda} &= 0.5^{\tfrac{1}{\mathbf{h}}}, \\
-\mathbf{h} &= \text{half-life}, \\
-\mathbf{c} &= \text{cap runs}, \\
-\boldsymbol{\alpha} &= \text{stress bump}.
+\text{EWRA}_0 &= 0, \\
+\text{EWRA}_i &= \lambda \cdot \text{EWRA}_{i-1} + \text{SARA}_i, \\
+\text{SARA}_i &= \min(\text{runs}_i, c) + \alpha \cdot \mathbf{1}_{\{\text{pitches} \ge 20\}}, \\
+i &= \text{i-th inning}, \\
+\lambda &= 0.5^{1/h}, \\
+h &= \text{half-life}, \\
+c &= \text{cap runs}, \\
+\alpha &= \text{stress bump}.
 \end{aligned}
 $$
 
