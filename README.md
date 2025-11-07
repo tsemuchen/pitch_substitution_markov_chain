@@ -13,24 +13,214 @@ During a close game in baseball, any tiny decision such as a substitute in  a pi
 
 ### 2.1 Scraping and construct play-by-play dataset
 
-The 2024 Statcast data was collected using the [scraper](https://github.com/skdeshpande91/stat479_fall2025/blob/main/scripts/annual_statcast_query.R) that utilizes baseballr::statcastsearch(). After scraping the data, we kept only regular-season games and the columns of interest. Since we analyze only full innings, the dataset includes only the first eight innings of each game. 
+The 2024 Statcast data was collected using the [scraper](https://github.com/skdeshpande91/stat479_fall2025/blob/main/scripts/annual_statcast_query.R) that utilizes `baseballr::statcastsearch()`. After scraping the data, we kept only regular-season games and the columns of interest. Since we analyze only full innings, the dataset includes only the first eight innings of each game.  We also use `baseballr` to access the Chadwick player register, which is useful for creating a id–name lookup table for pitchers.
 
+Library:
 ```
-#clean
+library(baseballr)
+library(dplyr)
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(colorBlindness)
 ```
+
+Scraper:
+```
+## Code modified from Bill Petti's original annual Statcast scraper:
+## Main change is in the column names of the fielders
+
+annual_statcast_query <- function(season) {
+  
+  data_base_column_types <- 
+    readr::read_csv("https://app.box.com/shared/static/q326nuker938n2nduy81au67s2pf9a3j.csv")
+  
+  dates <- 
+    seq.Date(as.Date(paste0(season, '-03-01')),
+             as.Date(paste0(season, '-12-01')), 
+             by = '4 days')
+  
+  date_grid <- 
+    tibble::tibble(start_date = dates, 
+                   end_date = dates + 3)
+  
+  safe_savant <- 
+    purrr::safely(baseballr::scrape_statcast_savant)
+  
+  payload <- 
+    purrr::map(.x = seq_along(date_grid$start_date),
+               ~{message(paste0('\nScraping week of ', date_grid$start_date[.x], '...\n'))
+                 payload <- 
+                   safe_savant(start_date = date_grid$start_date[.x], 
+                               end_date = date_grid$end_date[.x], 
+                               type = 'pitcher')
+                 return(payload)
+               })
+  
+  payload_df <- purrr::map(payload, 'result')
+  
+  number_rows <- 
+    purrr::map_df(.x = seq_along(payload_df),
+                  ~{number_rows <- 
+                    tibble::tibble(week = .x, 
+                                   number_rows = length(payload_df[[.x]]$game_date))
+                  }) %>%
+    dplyr::filter(number_rows > 0) %>%
+    dplyr::pull(week)
+  
+  payload_df_reduced <- payload_df[number_rows]
+  
+  payload_df_reduced_formatted <- 
+    purrr::map(.x = seq_along(payload_df_reduced), 
+               ~{cols_to_transform <- 
+                 c("pitcher", "fielder_2", "fielder_3",
+                   "fielder_4", "fielder_5", "fielder_6", "fielder_7",
+                   "fielder_8", "fielder_9")
+               df <- 
+                 purrr::pluck(payload_df_reduced, .x) %>%
+                 dplyr::mutate_at(.vars = cols_to_transform, as.numeric) %>%
+                 dplyr::mutate_at(.vars = cols_to_transform, function(x) {ifelse(is.na(x), 999999999, x)})
+               character_columns <- 
+                 data_base_column_types %>%
+                 dplyr::filter(class == "character") %>%
+                 dplyr::pull(variable)
+               numeric_columns <- 
+                 data_base_column_types %>%
+                 dplyr::filter(class == "numeric") %>%
+                 dplyr::pull(variable)
+               integer_columns <- 
+                 data_base_column_types %>%
+                 dplyr::filter(class == "integer") %>%
+                 dplyr::pull(variable)
+               df <- 
+                 df %>%
+                 dplyr::mutate_if(names(df) %in% character_columns, as.character) %>%
+                 dplyr::mutate_if(names(df) %in% numeric_columns, as.numeric) %>%
+                 dplyr::mutate_if(names(df) %in% integer_columns, as.integer)
+               return(df)
+               })
+  
+  combined <- payload_df_reduced_formatted %>%
+    dplyr::bind_rows()
+  
+  return(combined)
+}
+```
+
+Load data and initial cleaning
+```
+# raw_statcast2024 <- annual_statcast_query(2024)
+# save(raw_statcast2024, file = "raw_statcast2024.RData")
+
+# Load from saved file
+load("raw_statcast2024.RData")
+
+# Load the Chadwick player register
+# chadwick_players <- baseballr::chadwick_player_lu()
+# save(chadwick_players, file = "chadwick_players.RData")
+load("chadwick_players.RData")
+
+# filter potential useful columns
+useful_columns <- c("game_date", "player_name", "player", "batter",  "pitcher",
+                   "events", "description", "game_type", "stand", "p_throws", "home_team", 
+                   "away_team", "balls", "strikes", "game_year", "on_3b", "on_2b", 
+                   "on_1b", "outs_when_up", "inning", "inning_topbot", "game_pk", 
+                   "at_bat_number", "pitch_number", "pitch_name", "bat_score", 
+                   "fld_score", "post_bat_score", "post_fld_score", "delta_run_exp",
+                   "age_pit", "n_thruorder_pitcher", "bat_score_diff")
+
+# Clean data and create BaseRunner column
+# Keep only regular season & 1-8 innings
+game_seq <- raw_statcast2024 %>% 
+  dplyr::select(any_of(useful_columns)) %>%
+  filter(game_type == "R", inning < 9) %>% 
+  arrange(game_date, desc(game_pk), factor(inning_topbot, levels = c("Top", "Bot")),
+    inning, at_bat_number, pitch_number) %>% 
+  rename(pitcher_id = pitcher) %>% 
+  dplyr::mutate(
+    BaseRunner = 
+      paste0(1*(!is.na(on_1b)),1*(!is.na(on_2b)),1*(!is.na(on_3b))))
+```
+
 
 To better understand each pitcher’s season-long performance, we construct a pitcher profile dataset that summarizes key metrics such as average, median, and maximum pitch counts, along with each pitcher’s repertoire. In addition, we also assign a role label, “starter,” “long reliever,” or “short reliever”, based on the maximum number of pitches thrown in a single game. This role classification is especially useful for determining appropriate fatigue-level thresholds in later analysis.
 ```
-# Picture-level data construction+ half_inning _socre
+# Prepare a pitcher look up
+pitcher_lookup <- chadwick_players %>%
+  filter(!is.na(key_mlbam)) %>%
+  transmute(mlbam_id = key_mlbam,
+            pitcher_name = paste(name_first, name_last)) %>% 
+  rename(pitcher_id = mlbam_id)
+
+pitcher_info <- game_seq %>%
+  group_by(game_pk, pitcher_id) %>%
+  summarise(n_pitch = n(), .groups = "drop") %>%   # count pitches per game per pitcher
+  group_by(pitcher_id) %>%
+  summarise(pitch_avg = mean(n_pitch),
+            pitch_med = median(n_pitch),
+            max_pitch = max(n_pitch),
+            n_game = n(),
+            .groups = "drop") %>%  # average across all games
+  mutate(role = case_when(
+    max_pitch >= 80 ~ "starter",
+    max_pitch >= 50 ~ "long_reliever",
+    TRUE           ~ "reliever"
+  ))
+
+
+pitch_mix <- game_seq %>%
+  filter(!is.na(pitch_name)) %>%
+  group_by(pitcher_id, pitch_name) %>%
+  summarise(n_pitch = n(), .groups = "drop_last") %>%
+  mutate(total_pitch = sum(n_pitch)) %>%
+  ungroup() %>%
+  mutate(perc = 100 * n_pitch / total_pitch) %>%
+  group_by(pitcher_id) %>%
+  # only keep pitch types that are at least 5% of total usage, and 30 pitches thrown
+  filter(perc >= 5, n_pitch > 30) %>%
+  mutate(repertoire = n_distinct(pitch_name)) %>%          # count of qualifying pitches
+  slice_max(n_pitch, n = 2, with_ties = FALSE) %>%
+  arrange(pitcher_id, desc(perc)) %>%
+  summarise(
+    top1_pitch = first(pitch_name),
+    top1_perc  = first(perc),
+    top2_pitch = nth(pitch_name, 2),
+    top2_perc  = nth(perc, 2),
+    repertoire = first(repertoire), 
+    .groups = "drop"
+  )
+
+# combine pitcher information and pitch mix
+pitcher_profile <- pitcher_lookup %>% 
+  right_join(pitcher_info) %>% 
+  left_join(pitch_mix)
+
+# Half_inning_scores
+game_seq <- game_seq %>%
+  arrange(game_pk, inning, inning_topbot, at_bat_number, pitch_number)
+
+half_inning_scores <- game_seq %>%
+  group_by(game_pk, inning, inning_topbot) %>%
+  summarise(
+    # Batting team’s score at the very end of the half-inning
+    half_inning_end_bat_score = max(post_bat_score, na.rm = TRUE), 
+    .groups = "drop"
+  )
 ```
 
 Using our constructed dataset, we define conditioning variables: pitcher fatigue level, run differential, number of the times through the order, and a metric that evaluates the performance in the previous innings. 
 
 To summarize a pitcher’s performance entering a new inning, we develop the Exponential Weighted Runs Allowed (EWRA) metric, a recency-aware score that emphasizes recent performance while gradually fading the influence of earlier innings. For each inning, we define Stress-Adjust Run Allowed (SARA) that includes both actual runs and a stress bump to account for demanding innings: innings in which a pitcher throws 20 or more pitches are treated as contributing an additional 0.5 effective runs, reflecting the well-established impact of stressful innings on subsequent performance. EWRA is then computed recursively using an exponential decay factor governed by a half-life parameter, ensuring that recent innings carry more weight while older, potentially anomalous events diminish smoothly. This produces a single, interpretable measure of a pitcher’s short-term form and stability entering the upcoming inning.
-```
-# EWRA formulas
 
-```
+$$
+\begin{aligned}
+\text{EWRA}_0 &= 0, \\[6pt]
+\text{EWRA}_j &= \lambda \,\text{EWRA}_{j-1} + \text{SARA}_j, \\[6pt]
+\lambda &= 0.5^{\,1/h}, \qquad h = \text{half-life}, \\[12pt]
+\text{SARA}_j &= \min(\text{runs}_j, c) + \alpha \,\mathbf{1}\{\text{pitches}_j \ge 20\}, \\[6pt]
+c &= \text{run cap}.
+\end{aligned}
+$$
 
 We classify pitcher fatigue into five levels—Fresh, Settled-In, Working Load, Fatigued, and Redline. The thresholds between levels differ by role, since starters typically carry a higher pitch count than relievers(fg.1). To better filter the in-game circumstances, such as leading, trailing,  and pitcher’s performance entering the new inning, we classify the point difference into five levels and EWRA into three levels as well.(fg.2).
 
