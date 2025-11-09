@@ -650,9 +650,9 @@ Although our experiments focus on a single set of game context, the framework it
 
 Feature engineering with more comprehensive data to enhance estimation models.
  - Repertoire: The collection of different pitches a pitcher can throw.
-  - With runners on base, pitchers with high strikeout rates, often those who rely on a high-velocity four-seam fastball, are preferred.
+   - With runners on base, pitchers with high strikeout rates, often those who rely on a high-velocity four-seam fastball, are preferred.
  - Platoon decision: Lefty or righty
-  - Pitchers generally have an advantage when facing hitters of the same  handedness.
+   - Pitchers generally have an advantage when facing hitters of the same  handedness.
  - Run allowed in this inning
    - The Markov chain simulation of a half-inning cannot account for runs allowed earlier in the same inning before reaching a given state.
 
